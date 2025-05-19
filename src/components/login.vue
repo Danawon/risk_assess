@@ -182,5 +182,6 @@ h3 {
   text-align: center;
   box-shadow: 0px 4px 8px -1px #0C1CAD;
   font-size: 24px;
+  cursor: pointer;
 }
 </style>

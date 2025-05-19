@@ -82,10 +82,12 @@
           <div class="level">
             <div v-for="item, key in info.stageHeartRateRanges" :key="key"> 
               <div v-if="key <= info.currentStage" v-bind:style="{
-                background: `linear-gradient(90deg,${item.color[0]} 0%,${item.color[1] || item.color[0]} 100%)`,
+                background: `linear-gradient(90deg,
+                ${key == info.currentStage && isWarn ? '#adadad' : item.color[0]} 0%,
+                ${key == info.currentStage && isWarn ? '#adadad' : item.color[1] || item.color[0]} 100%)`,
+                animationDuration: `${key == info.currentStage ? 0 : animationTime}s`,
+                // animationDelay: `${key * 2}s`
                 // animationPlayState: 'paused/running'
-                animationDuration: `${key < info.currentStage &&   info.seconds}s`,
-                // animationDelay: `${key * (info.seconds/5)}s`
               }" />
               <span>{{ item.interval }}</span>
             </div>
@@ -104,7 +106,9 @@
         </div>
         <!-- 血压值 -->
         <div class="bloodPressure flex" v-for="item, k in info.testData" :key="k">
-          <div class="number">{{ item.stage }}</div>
+          <div class="number" :style="`${!item.status && 'background: #adadad'}`">
+            {{ item.stage }}
+          </div>
           <div style="margin: 0 49px 0 27px;">
             <span>血压值mmHg</span>
             <p>{{ item.bloodPressure }}</p>
@@ -113,7 +117,7 @@
             <label>摄氧量</label>
             <div>{{ item.oxygenUptake }}ml/kg/min</div>
           </div>
-          <img src="@/assets/monitor/check.png" width="40px" />
+          <img :src="require(`@/assets/monitor/${item.status ? item.status > 1 ? '' : 'check' : 'check_g'}.png`)" width="40px" />
           <div class="switch flex">
             <label>功率</label>
             <div>{{ item.power }}w</div>
@@ -147,7 +151,7 @@
 import ScreenAdapter from '../../components/ScreenAdapter';
 import RingProgress from '../../components/RingProgress';
 import { getInfo, startTest, endTest, stopTest } from '@/api';
-import { ElMessageBox } from 'element-plus'
+import { ElMessageBox, ElMessage } from 'element-plus'
 export default {
   name: "HeartRateMonitor",
   components: { ScreenAdapter, RingProgress },
@@ -163,21 +167,19 @@ export default {
       reconnectTimer: null,
       reconnectAttempts: 0,
       maxReconnectAttempts: 5,
-      animationTime: 0
+      animationTime: 0,
+      isWarn: false
     }
   },
   created() {
     this.getBase()
     this.updateTime()
+    this.initWebSocket()
     this.time = setInterval(this.updateTime, 1000)
   },
   beforeUnmount() {
     clearInterval(this.time)
     this.closeWebSocket();
-  },
-  mounted() {
-    // this.heartlung.status = 1
-    // this.heartlung.cadence = 90
   },
   methods: {
     // 获取页面信息
@@ -229,13 +231,7 @@ export default {
           break;
         case 'oxygenUptakeResult':
           if(_data.maxOxygenUptake) {
-            ElMessageBox.alert(`最大摄氧量为${_data.maxOxygenUptake}, 测试结果：${_data.name}, 超过${_data.exceed}的人;<br/>${_data.evaluate}`, '测试结束', {
-              confirmButtonText: '继续',
-              cancelButtonText: '结束',
-              showCancelButton: true,
-              dangerouslyUseHTMLString: true,
-              callback: (res) => this.operate(res)
-            })
+            _data.stage == 4 ? this.endMessageBox(_data) : this.nextMessageBox(_data.stage)
             return
           }
           this.info.testData[_data.stage - 1].power = _data.power
@@ -248,13 +244,78 @@ export default {
             this.animationTime = _data.seconds
           }
           break;
-        case 'powerStart':
+        case 'powerStart' || 'powerEnd':
           this.info.testData[_data.stage - 1].status = _data.status
           break;
-        case 'powerEnd':
-          this.info.testData[_data.stage - 1].status = 2
+        case 'heartRateLowWarn' || 'heartRateHighWarn':
+          ElMessage.close()
+          this.isWarn = true
+          ElMessage({
+            message: _data.msg,
+            type: 'warning',
+            onClose: () => {
+              this.isWarn = false
+            }
+          })
+          break;
+        case 'againEvaluateTest':
+          this.againMessageBox()
           break;
       }
+    },
+    // 重新评估弹窗
+    againMessageBox() {
+      ElMessageBox.close()
+      ElMessageBox.alert('您的平均心率不达标，需要重新测试!', '提示', {
+        showClose: false,
+        cancelButtonText: '结束测试',
+        confirmButtonText: '继续测试',
+        showCancelButton: true,
+        dangerouslyUseHTMLString: true,
+        callback: (res) => this.operate(res)
+      })
+    },
+    // 结束测试弹窗
+    endMessageBox(data) {
+      const content = `测试完成，结果为${data.name},超过${data.exceed}人群<br/>第4阶段血压测试是否完成?<br/>请完成血压测试后点击确认!`
+      ElMessageBox.alert(content, '测试结束提示', {
+        showClose: false,
+        confirmButtonText: '已完成',
+        showCancelButton: false,
+        dangerouslyUseHTMLString: true,
+        callback: () => this.operate('cancel')
+      })
+    },
+    // 是否继续下一阶段弹窗（10s倒计时自动开始)
+    nextMessageBox(stage) {
+      let countdown = 10, messageBoxTimer;
+      const content = `<p style="font-size: 18px;">第${stage}步测试结束啦，您的自我感受为？</p>
+      <p style="padding: 15px 0;color: red;">(<span class="timer">10</span>秒后自动开始下一阶段)<p>
+      ${stage == 2 ? '注意：2个阶段强度较低，测试值误差会较大!' : ''}`
+      ElMessageBox.alert(content, '提示', {
+        showClose: false,
+        confirmButtonText: '还不觉得累，继续下一阶段！',
+        cancelButtonText: '比较尽力了，结束测试吧！',
+        customStyle: {maxWidth: 'fit-content'},
+        showCancelButton: true,
+        dangerouslyUseHTMLString: true,
+        callback: (res) => {
+          clearInterval(messageBoxTimer)
+          this.operate(res)
+        }
+      })
+      messageBoxTimer = setInterval(() => {
+        if (countdown <= 1) {
+          messageBoxTimer && clearInterval(messageBoxTimer)
+          countdown = 10
+          this.operate('confirm')
+          ElMessageBox.close()
+          return
+        }
+        countdown--
+        const domeInfo = document.querySelector('.timer')
+        domeInfo.textContent = countdown
+      }, 1000)
     },
     // WebSocket连接
     initWebSocket() {
